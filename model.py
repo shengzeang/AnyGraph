@@ -7,6 +7,8 @@ from Utils.TimeLogger import log
 from torch.nn import MultiheadAttention
 from time import time
 
+from sklearn.cluster import KMeans
+
 init = nn.init.xavier_uniform_
 uniformInit = nn.init.uniform_
 
@@ -282,34 +284,28 @@ class AnyGraph(nn.Module):
         
     def assign_experts(self, handlers, reca=True, log_assignment=False):
         if args.expert_num == 1:
-            self.assignment = [0] * len(handlers)
-            return
+            assert len(handlers) == 1
         try:
+            # initial value/weight of expert assignment score, tends to assign more to less-trained experts
             expert_scores = np.array(list(map(lambda expert: expert.trn_count, self.experts)))
             expert_scores = (1.0 - expert_scores / np.sum(expert_scores)) * args.reca_range + 1.0 - args.reca_range / 2
         except Exception:
             expert_scores = np.ones(len(self.experts))
         with t.no_grad():
-            assignment = [list() for i in range(len(handlers))]
+            # empty list of lists of length of handlers (datasets)
+            # assignment change to num_node*num_expert
+            self.assignment = [list() for i in range(len(handlers))]
             for dataset_id, handler in enumerate(handlers):
-                topo_embeds = handler.projectors.to(args.devices[1])
-                for expert_id, expert in enumerate(self.experts):
-                    expert = expert.to(args.devices[1])
-                    score = expert.attempt(topo_embeds, handler.trn_loader.dataset)
-                    if reca:
-                        score *= expert_scores[expert_id]
-                    assignment[dataset_id].append((expert_id, score))
-                assignment[dataset_id].sort(key=lambda x: x[1], reverse=True)
-            if log_assignment:
-                print('\n----------\nAssignment')
-                for dataset_id, handler in enumerate(handlers):
-                    out = ''
-                    for exp_idx in range(min(4, len(self.experts))):
-                        out += f'({assignment[dataset_id][exp_idx][0]}, {assignment[dataset_id][exp_idx][1]}) '
-                    print(handler.data_name, out)
-                print('----------\n')
+                # change to clustering, later to graphon
+                topo_embeds = handler.projectors
+                self.assignment[dataset_id] = np.zeros(topo_embeds.shape[0])
 
-            self.assignment = list(map(lambda x: x[0][0], assignment))
+                # conduct clustering
+                kmeans = KMeans(n_clusters=min(args.expert_num, topo_embeds.shape[0]), random_state=0).fit(topo_embeds.numpy())
+                cluster_assign = kmeans.labels_
+                # too slow, more efficient implementation required
+                for node in range(topo_embeds.shape[0]):
+                    self.assignment[dataset_id][node] = cluster_assign[node]
     
     def summon(self, dataset_id):
         return self.experts[self.assignment[dataset_id]]

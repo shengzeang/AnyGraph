@@ -17,6 +17,7 @@ class MultiDataHandler:
         for tst_datasets in tst_datasets_group:
             all_datasets = all_datasets + tst_datasets
             all_tst_datasets += tst_datasets
+        # unique, remove repeated datasets
         all_datasets = list(set(all_datasets))
         all_datasets.sort()
         self.trn_handlers = []
@@ -31,6 +32,7 @@ class MultiDataHandler:
                 for i in range(len(tst_datasets_group)):
                     if data_name in tst_datasets_group[i]:
                         self.tst_handlers_group[i].append(handler)
+        # joint loader for multiple datasets/graphs
         self.make_joint_trn_loader()
     
     def make_joint_trn_loader(self):
@@ -49,8 +51,10 @@ class MultiDataHandler:
 class DataHandler:
     def __init__(self, data_name):
         self.data_name = data_name
+        # get the paths of dataset files
         self.get_data_files()
         log(f'Loading dataset {data_name}')
+        # use in self.make_projectors()
         self.topo_encoder = TopoEncoder()
         self.load_data()
     
@@ -146,6 +150,7 @@ class DataHandler:
             return t.sparse.FloatTensor(idxs, vals, shape)
 
     def load_data(self):
+        # mats are adjacency matrices or already processed training data (positive node pairs)?
         tst_mat = self.load_one_file(self.tstfile)
         val_mat = self.load_one_file(self.valfile)
         trn_mat = self.load_one_file(self.trnfile)
@@ -200,6 +205,7 @@ class DataHandler:
             self.asym_adj = self.trn_input_adj
         else:
             self.asym_adj = self.make_torch_adj(self.trn_mat, unidirectional_for_asym=True)
+        # project adj and feat and produce a unified feature
         self.make_projectors()
         self.reproj_steps = max(len(self.trn_loader.dataset) // (10 * args.batch), args.proj_trn_steps)
         self.ratio_500_all = 500 / len(self.trn_loader)
@@ -220,6 +226,7 @@ class DataHandler:
                 feats = feats + feats2
 
             try:
+                # mainly for neighbor propagation
                 self.projectors = self.topo_encoder(self.trn_input_adj.to(args.devices[0]), feats.to(args.devices[0])).detach().cpu()
             except Exception:
                 print(f'{self.data_name} memory overflow')
@@ -261,18 +268,21 @@ class TrnData(data.Dataset):
     def __init__(self, coomat):
         self.ancs, self.poss = coomat.row, coomat.col
         self.negs = np.zeros(len(self.ancs)).astype(np.int32)
+        # num_node
         self.cand_num = coomat.shape[1]
         self.neg_shift = 0 if coomat.shape[0] == coomat.shape[1] else coomat.shape[0]
         self.poss = coomat.col + self.neg_shift
         self.neg_sampling()
     
     def neg_sampling(self):
+        # same number of negative samples as positive samples, selecting from all nodes
         self.negs = np.random.randint(self.cand_num + self.neg_shift, size=self.poss.shape[0])
 
     def __len__(self):
         return len(self.ancs)
     
     def __getitem__(self, idx):
+        # triple of center (node, positive node, negative node)
         return self.ancs[idx], self.poss[idx] , self.negs[idx]
 
 class JointTrnData(data.Dataset):
@@ -296,6 +306,7 @@ class JointTrnData(data.Dataset):
         return len(self.batch_dataset_ids)
     
     def __getitem__(self, idx):
+        # return this batch's corresponding dataset and dataset indices
         st, ed = self.batch_st_ed_list[idx]
         dataset_id = self.batch_dataset_ids[idx]
         return *self.dataset_list[dataset_id][st: ed], dataset_id

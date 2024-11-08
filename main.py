@@ -159,6 +159,9 @@ class Exp:
                 steps -= 1
                 continue
 
+            # need to split the batch_data according to expert assignment results, then fed to training
+            # xxx
+
             expert = self.model.summon(dataset_id)
             opt = self.model.summon_opt(dataset_id)
             feats = self.multi_handler.trn_handlers[dataset_id].projectors
@@ -177,8 +180,8 @@ class Exp:
             counter[dataset_id] += 1
             if (counter[dataset_id] + 1) % self.multi_handler.trn_handlers[dataset_id].reproj_steps == 0:
                 self.multi_handler.trn_handlers[dataset_id].make_projectors()
-            if (i + 1) % reassign_steps == 0:
-                self.model.assign_experts(self.multi_handler.trn_handlers, reca=True, log_assignment=False)
+            # if (i + 1) % reassign_steps == 0:
+                # self.model.assign_experts(self.multi_handler.trn_handlers, reca=True, log_assignment=False)
         ret = dict()
         ret['Loss'] = ep_loss / tot_samp_num
         ret['preLoss'] = ep_preloss / tot_samp_num
