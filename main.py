@@ -146,6 +146,13 @@ class Exp:
         tot_samp_num = 0
         counter = [0] * len(self.multi_handler.trn_handlers)
         reassign_steps = sum(list(map(lambda x: x.reproj_steps, self.multi_handler.trn_handlers)))
+
+        # partial data samples should be aggregated first before training
+        num_experts = len(self.model.experts)
+        expert_ancs = [list() for _ in range(num_experts)]
+        expert_poss = [list() for _ in range(num_experts)]
+        expert_negs = [list() for _ in range(num_experts)]
+
         for i, batch_data in enumerate(trn_loader):
             if args.epoch_max_step > 0 and i >= args.epoch_max_step:
                 break
@@ -160,23 +167,38 @@ class Exp:
                 continue
 
             # need to split the batch_data according to expert assignment results, then fed to training
-            # xxx
-
-            expert = self.model.summon(dataset_id)
-            opt = self.model.summon_opt(dataset_id)
+            sample_assignment = self.model.assign_data(ancs, poss, negs)
             feats = self.multi_handler.trn_handlers[dataset_id].projectors
-            loss, loss_dict = expert.cal_loss((ancs, poss, negs), feats)
-            opt.zero_grad()
-            loss.backward()
-            opt.step()
+            loss_exist = False
+            for expert_id, expert in enumerate(self.model.experts):
+                per_ancs, per_poss, per_negs = sample_assignment[expert_id]
+                # aggregate training data
+                expert_ancs[expert_id].append(per_ancs)
+                expert_poss[expert_id].append(per_poss)
+                expert_negs[expert_id].append(per_negs)
+                # if the batch size is not enough, skip training this round
+                if len(expert_ancs[expert_id]) < args.batch_size:
+                    continue
 
-            sample_num = ancs.shape[0]
-            tot_samp_num += sample_num
-            ep_loss += loss.item() * sample_num
-            ep_preloss += loss_dict['preloss'].item() * sample_num
-            ep_regloss += loss_dict['regloss'].item()
-            log('Step %d/%d: loss = %.3f, pre = %.3f, reg = %.3f, pos = %.3f, neg = %.3f        ' % (i, steps, loss, loss_dict['preloss'], loss_dict['regloss'], loss_dict['posloss'], loss_dict['negloss']), save=False, oneline=True)
+                loss_exist = True
+                per_opt = self.model.opts[expert_id]
+                loss, loss_dict = expert.cal_loss((per_ancs, per_poss, per_negs), feats)
+                per_opt.zero_grad()
+                loss.backward()
+                per_opt.step()
 
+                per_sample_num = per_ancs.shape[0]
+                tot_samp_num += per_sample_num
+                ep_loss += loss.item() * per_sample_num
+                ep_preloss += loss_dict['preloss'].item() * per_sample_num
+                ep_regloss += loss_dict['regloss'].item()
+
+                expert_ancs[expert_id] = list()
+                expert_poss[expert_id] = list()
+                expert_negs[expert_id] = list()
+
+            if loss_exist:
+                log('Step %d/%d: loss = %.3f, pre = %.3f, reg = %.3f, pos = %.3f, neg = %.3f        ' % (i, steps, loss, loss_dict['preloss'], loss_dict['regloss'], loss_dict['posloss'], loss_dict['negloss']), save=False, oneline=True)
             counter[dataset_id] += 1
             if (counter[dataset_id] + 1) % self.multi_handler.trn_handlers[dataset_id].reproj_steps == 0:
                 self.multi_handler.trn_handlers[dataset_id].make_projectors()

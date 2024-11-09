@@ -307,6 +307,23 @@ class AnyGraph(nn.Module):
                 for node in range(topo_embeds.shape[0]):
                     self.assignment[dataset_id][node] = cluster_assign[node]
     
+    def assign_data(self, ancs, poss, negs):
+        # split batch_data according to cluster assignment
+        # return sample_assignment = num_expert*(ancs, poss, negs)
+        data_assignment = [list() for _ in range(len(self.experts))]
+        ancs_split = [list() for _ in range(len(self.experts))]
+        poss_split = [list() for _ in range(len(self.experts))]
+        negs_split = [list() for _ in range(len(self.experts))]
+        for i, node in enumerate(ancs):
+            ancs_split[self.assignment[node]].append(ancs[i])
+            poss_split[self.assignment[node]].append(poss[i])
+            negs_split[self.assignment[node]].append(negs[i])
+
+        for expert_id in range(len(self.experts)):
+            data_assignment[expert_id] = (ancs_split[expert_id], poss_split[expert_id], negs_split[expert_id])
+        return data_assignment
+
+
     def summon(self, dataset_id):
         return self.experts[self.assignment[dataset_id]]
     
