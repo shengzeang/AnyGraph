@@ -49,11 +49,15 @@ class Exp:
         if args.load_model != None:
             self.load_model()
             stloc = len(self.metrics['TrainLoss']) * args.tst_epoch - (args.tst_epoch - 1)
+
+        # compute cluster centroids for all the training data during pre-processing
+        self.model.gen_centroids(self.multi_handler.trn_handlers)
         best_ndcg, best_ep = 0, -1
         for ep in range(stloc, args.epoch):
             tst_flag = (ep % args.tst_epoch == 0)
             start_time = time.time()
-            self.model.assign_experts(self.multi_handler.trn_handlers, reca=True, log_assignment=True)
+            # put expert assignment to where actual training happens
+            # self.model.assign_experts(self.multi_handler.trn_handlers, reca=True, log_assignment=True)
             reses = self.train_epoch()
             log(self.make_print('Train', ep, reses, tst_flag))
             self.multi_handler.remake_initial_projections()
@@ -166,9 +170,9 @@ class Exp:
                 steps -= 1
                 continue
 
-            # need to split the batch_data according to expert assignment results, then fed to training
-            sample_assignment = self.model.assign_data(ancs, poss, negs)
             feats = self.multi_handler.trn_handlers[dataset_id].projectors
+            # need to split the batch_data according to expert assignment results, then fed to training
+            sample_assignment = self.model.assign_data(ancs, poss, negs, feats)
             loss_exist = False
             for expert_id, expert in enumerate(self.model.experts):
                 per_ancs, per_poss, per_negs = sample_assignment[expert_id]
@@ -217,6 +221,12 @@ class Exp:
         trn_masks = t.from_numpy(np.stack([trn_masks.row, trn_masks.col], axis=0)).long()
         return trn_masks, cand_size
 
+    def calc_tst_nodes_assignment(self, feats, centroids):
+        feats = feats.unsqueeze(1)
+        centroids = centroids.unsqueeze(0)
+        dists = t.norm(feats - centroids, dim=-1)
+        return t.argmin(dists, dim=-1)
+
     def test_epoch(self, handler, dataset_id):
         with t.no_grad():
             tst_loader = handler.tst_loader
@@ -229,15 +239,26 @@ class Exp:
                 if args.tst_steps != -1 and i > args.tst_steps:
                     break
 
+                # test nodes ID
                 usrs = batch_data.long()
+
+                # split usrs/batch_data according to pre-computed cluster centroids
+                usrs_assignment = self.calc_tst_nodes_assignment(handler.feats[usrs], self.model.cluster_centroids)
+
+
+                # trn_masks: [2, num_trn_edges starting from test nodes]
                 trn_masks, cand_size = self.make_trn_masks(batch_data.numpy(), tst_loader.dataset.csrmat)
                 feats = handler.projectors
+                # only regenerate embeddings for the first batch
                 all_preds = expert.pred_for_test((usrs, trn_masks), cand_size, feats, rerun_embed=False if i!=0 else True)
                 _, top_locs = t.topk(all_preds, args.topk)
                 top_locs = top_locs.cpu().numpy()
+                # compare to ground-truth test edges
                 recall, ndcg = self.calc_recall_ndcg(top_locs, tst_loader.dataset.tstLocs, usrs)
                 ep_recall += recall
                 ep_ndcg += ndcg
+
+
                 log('Steps %d/%d: recall = %.2f, ndcg = %.2f          ' % (i, steps, recall, ndcg), save=False, oneline=True)
         ret = dict()
         if args.tst_steps != -1:

@@ -12,6 +12,9 @@ import os
 
 class MultiDataHandler:
     def __init__(self, trn_datasets, tst_datasets_group):
+        # suppose only 1 set in tst_datasets_group
+        # trn_datasets for training, tst_datasets_group for inference
+        # conduct clustering on the joint trn_datasets, inference data assign according to training data clusters
         all_datasets = trn_datasets
         all_tst_datasets = []
         for tst_datasets in tst_datasets_group:
@@ -41,6 +44,8 @@ class MultiDataHandler:
             tem_dataset = trn_handler.trn_loader.dataset
             loader_datasets.append(tem_dataset)
         joint_dataset = JointTrnData(loader_datasets)
+        # input batch_id, output (batch_data, dataset_id)
+        # batch_data = (ancs, poss, negs)
         self.joint_trn_loader = data.DataLoader(joint_dataset, batch_size=1, shuffle=True, num_workers=0)
     
     def remake_initial_projections(self):
@@ -206,6 +211,7 @@ class DataHandler:
         else:
             self.asym_adj = self.make_torch_adj(self.trn_mat, unidirectional_for_asym=True)
         # project adj and feat and produce a unified feature
+        # utilize by calling self.projectors
         self.make_projectors()
         self.reproj_steps = max(len(self.trn_loader.dataset) // (10 * args.batch), args.proj_trn_steps)
         self.ratio_500_all = 500 / len(self.trn_loader)
@@ -223,10 +229,11 @@ class DataHandler:
             feats = projectors[0]()
             if len(projectors) == 2:
                 feats2 = projectors[1]()
+                # add the adj-mapped and the feat-mapped features
                 feats = feats + feats2
 
             try:
-                # mainly for neighbor propagation
+                # neighbor propagation
                 self.projectors = self.topo_encoder(self.trn_input_adj.to(args.devices[0]), feats.to(args.devices[0])).detach().cpu()
             except Exception:
                 print(f'{self.data_name} memory overflow')
@@ -242,6 +249,7 @@ class DataHandler:
                 self.projectors = t.concat(projectors_list, dim=-1)
             t.cuda.empty_cache()
 
+# kind of like a compressed row storage for test edges
 class TstData(data.Dataset):
     def __init__(self, coomat, trn_mat):
         self.csrmat = (trn_mat.tocsr() != 0) * 1.0
@@ -255,7 +263,9 @@ class TstData(data.Dataset):
             tstLocs[row].append(col)
             tst_nodes.add(row)
         tst_nodes = np.array(list(tst_nodes))
+        # test nodes after de-duplication
         self.tst_nodes = tst_nodes
+        # test edges, indexed by test node ID
         self.tstLocs = tstLocs
 
     def __len__(self):
@@ -287,6 +297,7 @@ class TrnData(data.Dataset):
 
 class JointTrnData(data.Dataset):
     def __init__(self, dataset_list):
+        # compute for each batch, dataset id and st/ed within this dataset
         self.batch_dataset_ids = []
         self.batch_st_ed_list = []
         self.dataset_list = dataset_list

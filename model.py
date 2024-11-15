@@ -1,4 +1,5 @@
 import torch as t
+from pyarrow.dataset import dataset
 from torch import nn
 import torch.nn.functional as F
 from params import args
@@ -247,6 +248,7 @@ class Expert(nn.Module):
 
         mask_mat = t.sparse.FloatTensor(trn_mask, t.ones(trn_mask.shape[1]).to(args.devices[1]), t.Size([ancs.shape[0], cand_size]))
         dense_mat = mask_mat.to_dense()
+        # mask train edges: (1 - dense_mat), generate predictions for all the other positions
         all_preds = anc_embeds @ cand_embeds.T * (1 - dense_mat) - dense_mat * 1e8
         return all_preds
 
@@ -281,43 +283,35 @@ class AnyGraph(nn.Module):
         super(AnyGraph, self).__init__()
         self.experts = nn.ModuleList([Expert() for _ in range(args.expert_num)]).cuda()
         self.opts = list(map(lambda expert: t.optim.Adam(expert.parameters(), lr=args.lr, weight_decay=0), self.experts))
-        
-    def assign_experts(self, handlers, reca=True, log_assignment=False):
-        if args.expert_num == 1:
-            assert len(handlers) == 1
-        try:
-            # initial value/weight of expert assignment score, tends to assign more to less-trained experts
-            expert_scores = np.array(list(map(lambda expert: expert.trn_count, self.experts)))
-            expert_scores = (1.0 - expert_scores / np.sum(expert_scores)) * args.reca_range + 1.0 - args.reca_range / 2
-        except Exception:
-            expert_scores = np.ones(len(self.experts))
-        with t.no_grad():
-            # empty list of lists of length of handlers (datasets)
-            # assignment change to num_node*num_expert
-            self.assignment = [list() for i in range(len(handlers))]
-            for dataset_id, handler in enumerate(handlers):
-                # change to clustering, later to graphon
-                topo_embeds = handler.projectors
-                self.assignment[dataset_id] = np.zeros(topo_embeds.shape[0])
 
-                # conduct clustering
-                kmeans = KMeans(n_clusters=min(args.expert_num, topo_embeds.shape[0]), random_state=0).fit(topo_embeds.numpy())
-                cluster_assign = kmeans.labels_
-                # too slow, more efficient implementation required
-                for node in range(topo_embeds.shape[0]):
-                    self.assignment[dataset_id][node] = cluster_assign[node]
+    def gen_centroids(self, handlers):
+        full_embeds = None
+        for dataset_id, handler in enumerate(handlers):
+            if full_embeds is None:
+                full_embeds = handler.projectors
+            else:
+                full_embeds = t.cat([full_embeds, handler.projectors], dim=0)
+        kmeans = KMeans(n_clusters=min(args.expert_num, full_embeds.shape[0]), random_state=0).fit(full_embeds.numpy())
+        self.cluster_centroids = kmeans.cluster_centers_
+
     
-    def assign_data(self, ancs, poss, negs):
+    def assign_data(self, ancs, poss, negs, embeds):
         # split batch_data according to cluster assignment
         # return sample_assignment = num_expert*(ancs, poss, negs)
+        ancs_embeds = embeds[ancs]
+        centroids = self.cluster_centroids.unsqueeze(0)
+        dists = t.norm(ancs_embeds - centroids, dim=-1)
+        ancs_assignment = t.argmin(dists, dim=-1)
+
         data_assignment = [list() for _ in range(len(self.experts))]
         ancs_split = [list() for _ in range(len(self.experts))]
         poss_split = [list() for _ in range(len(self.experts))]
         negs_split = [list() for _ in range(len(self.experts))]
-        for i, node in enumerate(ancs):
-            ancs_split[self.assignment[node]].append(ancs[i])
-            poss_split[self.assignment[node]].append(poss[i])
-            negs_split[self.assignment[node]].append(negs[i])
+        for i in range(len(ancs)):
+            assign_id = ancs_assignment[i]
+            ancs_split[assign_id].append(ancs[i])
+            poss_split[assign_id].append(poss[i])
+            negs_split[assign_id].append(negs[i])
 
         for expert_id in range(len(self.experts)):
             data_assignment[expert_id] = (ancs_split[expert_id], poss_split[expert_id], negs_split[expert_id])
