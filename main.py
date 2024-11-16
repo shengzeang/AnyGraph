@@ -66,7 +66,8 @@ class Exp:
             if tst_flag:
                 for handler_group_id in range(len(self.multi_handler.tst_handlers_group)):
                     tst_handlers = self.multi_handler.tst_handlers_group[handler_group_id]
-                    self.model.assign_experts(tst_handlers, reca=False, log_assignment=True)
+                    # put expert assignment to where actual inference happens
+                    # self.model.assign_experts(tst_handlers, reca=False, log_assignment=True)
                     recall, ndcg, tstnum = 0, 0, 0
                     for i, handler in enumerate(tst_handlers):
                         reses = self.test_epoch(handler, i)
@@ -94,7 +95,8 @@ class Exp:
                     mets = dict()
                     for _ in range(repeat_times):
                         handler.make_projectors()
-                        self.model.assign_experts([handler], reca=False, log_assignment=False)
+                        # put expert assignment to where actual inference happens
+                        # self.model.assign_experts([handler], reca=False, log_assignment=False)
                         reses = self.test_epoch(handler, 0)
                         for met in reses:
                             if met not in mets:
@@ -149,7 +151,6 @@ class Exp:
         steps = len(trn_loader)
         tot_samp_num = 0
         counter = [0] * len(self.multi_handler.trn_handlers)
-        reassign_steps = sum(list(map(lambda x: x.reproj_steps, self.multi_handler.trn_handlers)))
 
         # partial data samples should be aggregated first before training
         num_experts = len(self.model.experts)
@@ -206,8 +207,7 @@ class Exp:
             counter[dataset_id] += 1
             if (counter[dataset_id] + 1) % self.multi_handler.trn_handlers[dataset_id].reproj_steps == 0:
                 self.multi_handler.trn_handlers[dataset_id].make_projectors()
-            # if (i + 1) % reassign_steps == 0:
-                # self.model.assign_experts(self.multi_handler.trn_handlers, reca=True, log_assignment=False)
+
         ret = dict()
         ret['Loss'] = ep_loss / tot_samp_num
         ret['preLoss'] = ep_preloss / tot_samp_num
@@ -231,7 +231,6 @@ class Exp:
         with t.no_grad():
             tst_loader = handler.tst_loader
             self.model.eval()
-            expert = self.model.summon(dataset_id)
             ep_recall, ep_ndcg = 0, 0
             ep_tstnum = len(tst_loader.dataset)
             steps = max(ep_tstnum // args.tst_batch, 1)
@@ -241,25 +240,33 @@ class Exp:
 
                 # test nodes ID
                 usrs = batch_data.long()
-
                 # split usrs/batch_data according to pre-computed cluster centroids
-                usrs_assignment = self.calc_tst_nodes_assignment(handler.feats[usrs], self.model.cluster_centroids)
+                # use projected features to calculate the assignment
+                usrs_assignment = self.calc_tst_nodes_assignment(handler.projectors[usrs], self.model.cluster_centroids)
+                usrs_split = [list() for _ in range(len(self.model.experts))]
+                usrs_split_local = [list() for _ in range(len(self.model.experts))]
+                for j, usr in enumerate(usrs):
+                    usrs_split[usrs_assignment[j].item()].append(usr)
+                    usrs_split_local[usrs_assignment[j].item()].append(j)
 
-
-                # trn_masks: [2, num_trn_edges starting from test nodes]
-                trn_masks, cand_size = self.make_trn_masks(batch_data.numpy(), tst_loader.dataset.csrmat)
-                feats = handler.projectors
-                # only regenerate embeddings for the first batch
-                all_preds = expert.pred_for_test((usrs, trn_masks), cand_size, feats, rerun_embed=False if i!=0 else True)
-                _, top_locs = t.topk(all_preds, args.topk)
-                top_locs = top_locs.cpu().numpy()
-                # compare to ground-truth test edges
-                recall, ndcg = self.calc_recall_ndcg(top_locs, tst_loader.dataset.tstLocs, usrs)
-                ep_recall += recall
-                ep_ndcg += ndcg
-
+                for expert_id, expert in enumerate(self.model.experts):
+                    usrs_expert = t.LongTensor(usrs_split[expert_id])
+                    usrs_expert_local = t.LongTensor(usrs_split_local[expert_id])
+                    # trn_masks: [2, num_trn_edges starting from test nodes]
+                    trn_masks, cand_size = self.make_trn_masks(usrs_expert.numpy(), tst_loader.dataset.csrmat)
+                    full_embeds = handler.projectors
+                    # only regenerate embeddings for the first batch
+                    all_preds = expert.pred_for_test((usrs_expert, trn_masks), cand_size, full_embeds, rerun_embed=False if i!=0 else True)
+                    _, top_locs = t.topk(all_preds, args.topk)
+                    top_locs = top_locs.cpu().numpy()
+                    # compare to ground-truth test edges
+                    # convert to local index first
+                    recall, ndcg = self.calc_recall_ndcg(top_locs, tst_loader.dataset.tstLocs[usrs_expert_local], usrs_expert)
+                    ep_recall += recall
+                    ep_ndcg += ndcg
 
                 log('Steps %d/%d: recall = %.2f, ndcg = %.2f          ' % (i, steps, recall, ndcg), save=False, oneline=True)
+
         ret = dict()
         if args.tst_steps != -1:
             ep_tstnum = args.tst_steps * args.tst_batch

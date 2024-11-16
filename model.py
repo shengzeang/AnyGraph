@@ -316,10 +316,3 @@ class AnyGraph(nn.Module):
         for expert_id in range(len(self.experts)):
             data_assignment[expert_id] = (ancs_split[expert_id], poss_split[expert_id], negs_split[expert_id])
         return data_assignment
-
-
-    def summon(self, dataset_id):
-        return self.experts[self.assignment[dataset_id]]
-    
-    def summon_opt(self, dataset_id):
-        return self.opts[self.assignment[dataset_id]]
